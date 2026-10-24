@@ -1,0 +1,3 @@
+-keep class com.sunmi.** { *; }
+-keep interface com.sunmi.** { *; }
+-keep class android.os.SystemProperties { *; }

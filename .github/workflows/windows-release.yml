@@ -1,0 +1,124 @@
+name: Windows Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_notes:
+        description: Notas para el manifest generado
+        required: false
+        default: Actualizacion publicada desde GitHub Actions.
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-release:
+    runs-on: windows-latest
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+      DASHBOARD_API_BASE_URL: ${{ secrets.DASHBOARD_API_BASE_URL }}
+      WINDOWS_UPDATE_MANIFEST_URL: ${{ secrets.WINDOWS_UPDATE_MANIFEST_URL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Read app version from pubspec
+        shell: pwsh
+        run: |
+          $match = Select-String -Path pubspec.yaml -Pattern '^version:\s*([0-9]+\.[0-9]+\.[0-9]+)'
+          if (-not $match) {
+            throw "No se pudo leer la version desde pubspec.yaml"
+          }
+          $version = $match.Matches[0].Groups[1].Value
+          "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build Windows release
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SUPABASE_URL)) {
+            throw "Falta el secret SUPABASE_URL"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:SUPABASE_PUBLISHABLE_KEY)) {
+            throw "Falta el secret SUPABASE_PUBLISHABLE_KEY"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:DASHBOARD_API_BASE_URL)) {
+            throw "Falta el secret DASHBOARD_API_BASE_URL"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_UPDATE_MANIFEST_URL)) {
+            throw "Falta el secret WINDOWS_UPDATE_MANIFEST_URL"
+          }
+
+          flutter build windows --release `
+            --dart-define=SUPABASE_URL=$env:SUPABASE_URL `
+            --dart-define=SUPABASE_PUBLISHABLE_KEY=$env:SUPABASE_PUBLISHABLE_KEY `
+            --dart-define=DASHBOARD_API_BASE_URL=$env:DASHBOARD_API_BASE_URL `
+            --dart-define=WINDOWS_UPDATE_MANIFEST_URL=$env:WINDOWS_UPDATE_MANIFEST_URL
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Package installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            "/DMyAppVersion=$env:APP_VERSION" `
+            "/DMyAppExeName=mediasis_dashboard_app.exe" `
+            "/DMyAppSourceDir=$pwd\build\windows\x64\runner\Release" `
+            "/DMyOutputDir=$pwd\dist" `
+            "packaging\windows\mediasis-orders.iss"
+
+      - name: Package Microsoft Store MSIX
+        shell: pwsh
+        run: dart run msix:create --build-windows false --output-path "$pwd\dist" --output-name mediasis-orders-store
+
+      - name: Create checksum, manifest and portable archive
+        shell: pwsh
+        run: |
+          $installer = Join-Path $pwd "dist\mediasis-orders-setup.exe"
+          if (-not (Test-Path $installer)) {
+            throw "No se encontro el instalador generado."
+          }
+
+          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path "$installer.sha256" -Value $hash -NoNewline
+
+          Compress-Archive `
+            -Path "$pwd\build\windows\x64\runner\Release\*" `
+            -DestinationPath "$pwd\dist\mediasis-orders-windows-portable.zip" `
+            -Force
+
+          $manifest = @{
+            latest_version = $env:APP_VERSION
+            minimum_supported_version = $env:APP_VERSION
+            installer_url = "REPLACE_WITH_GITHUB_RELEASE_URL"
+            sha256 = $hash
+            notes = "${{ github.event.inputs.release_notes }}"
+            published_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+          } | ConvertTo-Json
+
+          Set-Content -Path "$pwd\dist\update-manifest.json" -Value $manifest
+
+      - name: Upload Windows release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-${{ env.APP_VERSION }}
+          path: |
+            dist/mediasis-orders-setup.exe
+            dist/mediasis-orders-store.msix
+            dist/mediasis-orders-setup.exe.sha256
+            dist/mediasis-orders-windows-portable.zip
+            dist/update-manifest.json
+          if-no-files-found: error

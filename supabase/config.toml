@@ -1,0 +1,5 @@
+[functions.notify-new-order]
+verify_jwt = false
+
+[functions.background-print-receipt]
+verify_jwt = false
