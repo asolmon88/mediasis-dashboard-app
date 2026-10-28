@@ -56,3 +56,6 @@ app.*.map.json
 
 .mcp.json
 .claude/*
+
+# Environment files must never be committed.
+.env*
